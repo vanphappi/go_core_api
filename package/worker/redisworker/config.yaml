@@ -1,0 +1,59 @@
+# Redis configuration
+RedisAddr: "localhost:6379"
+
+# Queue name in Redis
+QueueName: "task_queue"
+
+# Number of worker instances
+WorkerCount: 1
+
+# Logging configuration
+Logging: true
+
+# Maximum number of retries for failed tasks
+MaxRetries: 3
+
+# Interval between task retries
+RetryInterval: 5s
+
+# Graceful shutdown duration
+GracefulStop: 10s
+
+# Time-to-live for tasks in Redis
+TaskTTL: 24h
+
+# Rate limit for task processing
+RateLimit: 10
+
+# Address for Prometheus metrics endpoint
+MetricsAddr: ":2112"
+
+# Timeout duration for individual tasks
+TaskTimeout: 60s
+
+# Delay before retrying failed tasks
+TaskRetryDelay: 1m
+
+# Throttle limit for task processing
+ThrottleLimit: 100
+
+# Interval for task processing throttling
+ThrottleInterval: 1s
+
+# Enable dynamic scaling of worker instances
+DynamicScaling: false
+
+# Scaling factor for dynamic worker scaling
+WorkerScalingFactor: 1.5
+
+# Enable task deduplication
+TaskDeduplication: true
+
+# Priority policy for task processing (e.g., "fifo" or "lifo")
+PriorityPolicy: "fifo"
+
+# Enable task chaining
+TaskChaining: false
+
+# Enable task middleware
+TaskMiddleware: false
