@@ -4,7 +4,7 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
-	"go_core_api/platform/encryption"
+	"go_core_api/package/encryption"
 	"strings"
 	"time"
 
