@@ -1,11 +1,11 @@
 package postgresql
 
-
 import (
 	"context"
 	"log"
+
 	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq" 
+	_ "github.com/lib/pq"
 )
 
 const ConnString = "postgres://root:exevipvl@hostt:5432/EXE201?sslmode=disable"

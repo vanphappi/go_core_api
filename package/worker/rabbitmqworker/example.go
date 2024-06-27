@@ -1,8 +1,13 @@
 package rabbitmqworker
 
 import (
+	"context"
 	"fmt"
 	"go_core_api/package/worker"
+	"go_core_api/platform/rabbitmq"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -12,10 +17,17 @@ func Example() {
 
 	// Display loaded configuration
 	fmt.Println("Loaded Configuration:")
-	fmt.Printf("%+v\n", config)
+
+	rabbitMQ, err := rabbitmq.NewRabbitMQ(config.RabbitMQConfig)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	defer rabbitMQ.SignalHandler()
 
 	// Create a Redis worker instance with loaded configuration
-	rw, _ := NewRabbitMQWorker(config)
+	rw, _ := NewRabbitMQWorker(config, rabbitMQ)
 
 	// Define a task processing function
 	processFunc := map[string]func(task *worker.Task) error{
@@ -29,14 +41,20 @@ func Example() {
 		},
 	}
 
+	// Setup a context for graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Start worker with task processing function
 	go rw.StartWorkers(processFunc)
 
-	// Simulate tasks being enqueued
+	//Simulate tasks being enqueued
 	go func() {
-		for i := 0; i < 5; i++ {
+		for i := 1; i < 5; i++ {
 			task := worker.NewTask(fmt.Sprintf("task%d", i), "default", fmt.Sprintf("payload%d", i), 1, time.Now(), 0, 0)
+
 			err := rw.EnqueueTask(task)
+
 			if err != nil {
 				fmt.Printf("Error enqueuing task: %s\n", err)
 			} else {
@@ -46,6 +64,8 @@ func Example() {
 		}
 	}()
 
-	// Keep the main goroutine running
-	select {}
+	<-ctx.Done()
+
+	// // Keep the main goroutine running
+	// select {}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"go_core_api/package/worker"
+	"go_core_api/platform/rabbitmq"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,12 +16,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.uber.org/zap"
 )
 
 type RabbitMQWorker struct {
-	conn               *amqp.Connection
-	ch                 *amqp.Channel
-	queueName          string
+	rbw                *rabbitmq.RabbitMQ
 	ctx                context.Context
 	cancel             context.CancelFunc
 	errorCount         prometheus.Counter
@@ -33,40 +36,12 @@ type RabbitMQWorker struct {
 	processedTasksMux  sync.Mutex
 }
 
-func NewRabbitMQWorker(config *Config) (*RabbitMQWorker, error) {
-	conn, err := amqp.Dial(config.RabbitMQURL)
-
-	if err != nil {
-		return nil, err
-	}
-
-	ch, err := conn.Channel()
-
-	if err != nil {
-		return nil, err
-	}
-
-	q, err := ch.QueueDeclare(
-		config.QueueName,
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-
-	if err != nil {
-		return nil, err
-	}
-
+func NewRabbitMQWorker(config *Config, rbw *rabbitmq.RabbitMQ) (*RabbitMQWorker, error) {
 	logger := logrus.New()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	rmqw := &RabbitMQWorker{
-		conn:            conn,
-		ch:              ch,
-		queueName:       q.Name,
 		ctx:             ctx,
 		cancel:          cancel,
 		errorCount:      prometheus.NewCounter(prometheus.CounterOpts{Name: "error_count", Help: "Number of task processing errors"}),
@@ -74,6 +49,7 @@ func NewRabbitMQWorker(config *Config) (*RabbitMQWorker, error) {
 		logger:          logger,
 		config:          config,
 		workerInstances: config.WorkerCount,
+		rbw:             rbw,
 		processedTasks:  make(map[string]time.Time),
 	}
 
@@ -91,17 +67,7 @@ func (rmqw *RabbitMQWorker) EnqueueTask(task *worker.Task) error {
 		return err
 	}
 
-	err = rmqw.ch.Publish(
-		"",             // exchange
-		rmqw.queueName, // routing key
-		false,          // mandatory
-		false,          // immediate
-		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        taskByte,
-			Priority:    uint8(task.Priority),
-		},
-	)
+	err = rmqw.rbw.Publish(rmqw.ctx, rmqw.config.BindQueueOptions.Exchange, rmqw.config.BindQueueOptions.Key, taskByte, rmqw.config.RabbitMQConfig.RetryCount, rmqw.config.RabbitMQConfig.RetryDelay, "application/json", uint8(task.Priority))
 
 	if err != nil {
 		return err
@@ -136,60 +102,88 @@ func (rmqw *RabbitMQWorker) StartWorkers(processFunc map[string]func(task *worke
 }
 
 func (rmqw *RabbitMQWorker) worker(processFunc map[string]func(task *worker.Task) error) {
-	// Consume messages from RabbitMQ
-	msgs, err := rmqw.ch.Consume(
-		rmqw.queueName, // Queue name
-		"",             // Consumer tag
-		true,           // Auto acknowledge
-		false,          // Exclusive
-		false,          // No local
-		false,          // No wait
-		nil,            // Args
-	)
+	for {
+		select {
+		case <-rmqw.ctx.Done():
+			return
+		default:
+			rmqw.processTasks(processFunc)
+			time.Sleep(time.Second / time.Duration(rmqw.config.RateLimit))
+		}
+	}
+}
 
-	if err != nil {
-		rmqw.logger.Fatalf("Failed to register a consumer: %v", err)
+func (rmqw *RabbitMQWorker) processTasks(processFunc map[string]func(task *worker.Task) error) {
+	// Middleware example: Logging middleware
+	loggingMiddleware := func(next rabbitmq.Handler) rabbitmq.Handler {
+		return func(ctx context.Context, d amqp.Delivery) {
+			var task worker.Task
+			err := json.Unmarshal(d.Body, &task)
+			if err != nil {
+				rmqw.logger.Error("Failed to unmarshal task", zap.Error(err))
+				d.Nack(false, true)
+				return
+			}
+			rmqw.logger.Info("Processing task:", task.ID)
+			next(ctx, d)
+		}
 	}
 
-	for msg := range msgs {
-		// Convert message bytes to a string
-		msgBody := string(msg.Body)
+	// Middleware example: Tracing middleware
+	tracingMiddleware := func(next rabbitmq.Handler) rabbitmq.Handler {
+		return func(ctx context.Context, d amqp.Delivery) {
+			tr := otel.Tracer("rabbitmq worker")
+			ctx, span := tr.Start(ctx, "ConsumeTask")
+			defer span.End()
 
-		// Deserialize the message into a task
-		task, err := worker.TaskFromJSON(msgBody)
+			next(ctx, d)
 
+			span.SetAttributes(attribute.String("Task_body", string(d.Body)))
+			span.SetStatus(codes.Ok, "Task processed")
+		}
+	}
+
+	// Consume messages with middleware
+	err := rmqw.rbw.ConsumeWithMiddleware(rmqw.ctx, rmqw.config.QueueOptions.Name, false, func(ctx context.Context, d amqp.Delivery) {
+		var task worker.Task
+		err := json.Unmarshal(d.Body, &task)
 		if err != nil {
-			// Log and handle parsing errors
-			rmqw.handleProcessingError(msg.Body, err)
-			continue
+			rmqw.logger.Error("Failed to unmarshal task", zap.Error(err))
+			d.Nack(false, true)
+			return
 		}
 
 		// Check for duplicate tasks
 		if rmqw.isDuplicateTask(task.ID) {
 			rmqw.logger.WithFields(logrus.Fields{"task_id": task.ID}).Warn("Duplicate task detected")
-			continue
 		}
 
-		// Process the task using the provided function
+		//Process the task using the provided function
 		handler, exists := processFunc[task.Type]
 
 		if !exists {
 			rmqw.logger.WithFields(logrus.Fields{"task_id": task.ID}).Error("No handler for task type")
-			continue
 		}
 
 		// Execute the task handler
-		if err := handler(task); err != nil {
+		if err := handler(&task); err != nil {
+			rmqw.handleProcessingError(d.Body, err)
 			// Log and handle processing errors
-			rmqw.handleProcessingError(msg.Body, err)
-			continue
 		}
 
 		// Log successful task processing
 		rmqw.logger.WithFields(logrus.Fields{"task_id": task.ID}).Info("Task processed")
 		rmqw.taskCount.Inc()
 		rmqw.markTaskProcessed(task.ID)
+
+		d.Ack(false)
+	}, tracingMiddleware, loggingMiddleware)
+
+	if err != nil {
+		rmqw.logger.Fatal("Failed to consume tasks", zap.Error(err))
 	}
+
+	<-rmqw.ctx.Done()
 }
 
 func (rmqw *RabbitMQWorker) handleProcessingError(body []byte, err error) {
@@ -225,7 +219,7 @@ func (rmqw *RabbitMQWorker) getRetryCount(body []byte) (int, bool) {
 		return 0, false
 	}
 
-	retryCount, ok := task["retry_count"].(int)
+	retryCount, ok := task["retries"].(int)
 
 	return retryCount, ok
 }
@@ -239,24 +233,17 @@ func (rmqw *RabbitMQWorker) requeueTask(body []byte, retryCount int) error {
 		return err
 	}
 
-	task["retry_count"] = retryCount
+	task["retries"] = retryCount
 
-	taskJSON, err := json.Marshal(task)
+	taskByte, err := json.Marshal(task)
 
 	if err != nil {
 		return err
 	}
 
-	return rmqw.ch.Publish(
-		"",             // exchange
-		rmqw.queueName, // routing key
-		false,          // mandatory
-		false,          // immediate
-		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        taskJSON,
-		},
-	)
+	err = rmqw.rbw.Publish(rmqw.ctx, rmqw.config.BindQueueOptions.Exchange, rmqw.config.BindQueueOptions.Key, taskByte, rmqw.config.RabbitMQConfig.RetryCount, rmqw.config.RabbitMQConfig.RetryDelay, "application/json", uint8(task["priority"].(int)))
+
+	return err
 }
 
 func (rmqw *RabbitMQWorker) scaleWorkers(processFunc map[string]func(task *worker.Task) error) {
@@ -264,14 +251,15 @@ func (rmqw *RabbitMQWorker) scaleWorkers(processFunc map[string]func(task *worke
 		time.Sleep(30 * time.Second)
 
 		// Get current number of messages in the queue
-		queueSize, err := rmqw.ch.QueueInspect(rmqw.queueName)
+		queue, err := rmqw.rbw.QueueInspect(rmqw.config.QueueOptions.Name)
+
 		if err != nil {
 			rmqw.logger.WithError(err).Error("Failed to inspect queue")
 			continue
 		}
 
 		// Calculate the average number of messages per worker
-		avgMessagesPerWorker := float64(queueSize.Messages) / float64(rmqw.config.WorkerCount)
+		avgMessagesPerWorker := float64(queue.Messages) / float64(rmqw.config.WorkerCount)
 
 		// If the average exceeds the scaling rate, add more workers
 		if avgMessagesPerWorker > rmqw.config.WorkerScalingRate {
@@ -321,14 +309,6 @@ func (rmqw *RabbitMQWorker) removeWorker(count int) {
 func (rmqw *RabbitMQWorker) Shutdown() {
 	if rmqw.config.Logging {
 		rmqw.logger.Println("Shutting down workers gracefully...")
-	}
-
-	if err := rmqw.ch.Close(); err != nil {
-		rmqw.logger.WithError(err).Error("Error closing RabbitMQ channel")
-	}
-
-	if err := rmqw.conn.Close(); err != nil {
-		rmqw.logger.WithError(err).Error("Error closing RabbitMQ connection")
 	}
 
 	time.Sleep(rmqw.config.GracefulStop)
