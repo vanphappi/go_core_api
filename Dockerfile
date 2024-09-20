@@ -12,5 +12,3 @@ COPY . .
 
 # 
 RUN go build -ldflags="-s -w" -o ./build/execute .
-
-EXPOSE 9000

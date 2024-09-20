@@ -3,6 +3,7 @@ module go_core_api
 go 1.21.4
 
 require (
+	github.com/aws/aws-sdk-go v1.54.9
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/getsentry/sentry-go v0.27.0
 	github.com/go-telegram-bot-api/telegram-bot-api v4.6.4+incompatible
@@ -34,6 +35,7 @@ require (
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
+	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/klauspost/compress v1.17.8 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect

@@ -2,31 +2,58 @@ package mongodb
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"time"
 
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+type Config struct {
+	DBType                   string
+	DBHost                   string
+	DBPort                   string
+	DBUser                   string
+	DBPassword               string
+	DBName                   string
+	DBSSLMode                string
+	DBMaxConnections         uint64
+	DBMaxIdleConnections     int
+	DBMaxLifetimeConnections int
+}
+
 type MongoDB struct {
-	DBHost string
-	DBPort string
-	DBName string
+	client   *mongo.Client
+	database *mongo.Database
 }
 
-var client *mongo.Client
-
-func NewContext() (context.Context, context.CancelFunc) {
-	// return context.WithTimeout(context.Background(), 10*time.Second)
-	return context.TODO(), nil
-}
-
-func Shutdown() {
-	ctx, _ := NewContext()
-	if client != nil {
-		err := client.Disconnect(ctx)
-		if err != nil {
-			log.Fatalf("Cannot disconnect MongoDB: %v", err)
-		}
+func NewMongoDB(config *Config) (*MongoDB, error) {
+	uri := fmt.Sprintf("mongodb://%s:%s@%s:%s/%s", config.DBUser, config.DBPassword, config.DBHost, config.DBPort, config.DBName)
+	if config.DBUser == "" || config.DBPassword == "" {
+		uri = fmt.Sprintf("mongodb://%s:%s", config.DBHost, config.DBPort)
 	}
-	log.Println("[MONGO_DB] disconnect successfully")
+
+	clientOptions := options.Client().ApplyURI(uri).
+		SetMaxPoolSize(config.DBMaxConnections).
+		SetMaxConnIdleTime(time.Duration(config.DBMaxIdleConnections) * time.Second).
+		SetConnectTimeout(time.Duration(config.DBMaxLifetimeConnections) * time.Second)
+
+	client, err := mongo.Connect(context.Background(), clientOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	err = client.Ping(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MongoDB{
+		client:   client,
+		database: client.Database(config.DBName),
+	}, nil
+}
+
+func (mdb *MongoDB) Close() error {
+	return mdb.client.Disconnect(context.Background())
 }

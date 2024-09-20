@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  core-api-service:
+    container_name: core-api
+    image: core-api
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: core-api
+    restart: always
+    networks:
+      - core-api-network
+    command: ["sh", "-c", "cd build/execute && ./server"]
+    volumes:
+      - .:/build
+    ports:
+      - 9000:9000
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: admin
+
+  # mongo:
+  #   image: mongo:latest
+  #   container_name: mongo-db
+  #   hostname: mongodb
+  #   networks:
+  #     - core-api-network
+  #   restart: always
+  #   environment:
+  #     MONGO_INITDB_ROOT_USERNAME: root
+  #     MONGO_INITDB_ROOT_PASSWORD: admin
+  #   ports:
+  #     - 27017:27017
+  #   volumes:
+  #     - ./db:/data/db
+  #     - ./docker-entrypoint-initdb.d/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+  #   depends_on:
+  #     - core-api-service
+
+networks:
+  core-api-network:
+    name: core-api-network
+    driver: bridge

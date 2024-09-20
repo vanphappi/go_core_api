@@ -156,6 +156,7 @@ func (rmqw *RabbitMQWorker) processTasks(processFunc map[string]func(task *worke
 		// Check for duplicate tasks
 		if rmqw.isDuplicateTask(task.ID) {
 			rmqw.logger.WithFields(logrus.Fields{"task_id": task.ID}).Warn("Duplicate task detected")
+			return
 		}
 
 		//Process the task using the provided function
@@ -163,12 +164,15 @@ func (rmqw *RabbitMQWorker) processTasks(processFunc map[string]func(task *worke
 
 		if !exists {
 			rmqw.logger.WithFields(logrus.Fields{"task_id": task.ID}).Error("No handler for task type")
+			d.Nack(false, true)
+			return
 		}
 
 		// Execute the task handler
 		if err := handler(&task); err != nil {
-			rmqw.handleProcessingError(d.Body, err)
 			// Log and handle processing errors
+			rmqw.handleProcessingError(d.Body, err)
+			return
 		}
 
 		// Log successful task processing
